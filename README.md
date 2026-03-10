@@ -2,6 +2,22 @@
 qemu setup on arch
 ```
 sudo pacman -S qemu-full
-wget https://geo.mirror.pkgbuild.com/iso/latest/archlinux-x86_64.iso
+wget https://releases.ubuntu.com/noble/ubuntu-24.04.4-live-server-amd64.iso
 qemu-img create -f qcow2 vm.qcow2 40G
 truncate -s 16G zns.img
+
+qemu-system-x86_64 \
+  -enable-kvm \
+  -m 4G \
+  -smp 4 \
+  -cpu host \
+  -drive file=vm.qcow2,if=virtio,format=qcow2 \
+  -cdrom ubuntu-24.04.4-live-server-amd64.iso \
+  -boot d \
+  \
+  -device nvme,id=nvme0,serial=deadbeef \
+  -drive file=zns.img,if=none,id=zns0,format=raw \
+  -device nvme-ns,drive=zns0,bus=nvme0,nsid=1,zoned=true \
+  \
+  -net nic -net user \
+  -nographic
