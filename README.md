@@ -54,7 +54,7 @@ mkfs.f2fs -f -m -c /dev/vdb /dev/nvme0n1
 mount -t f2fs /dev/vdb /mnt/f2fs/
 ```
 # other
-for this type youneed to extract kernel
+for this type you need to extract kernel (not used right now)
 ```
 mkdir -p iso-mount
 sudo mount -o loop "$ISO" iso-mount
