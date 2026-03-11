@@ -46,7 +46,7 @@ you can ssh into it if you want
 ssh -p 2222 user@localhost
 ```
 # F2FS setup
-f2fs requires a small conventional drive dor the metadata
+f2fs requires a small conventional drive for the metadata
 inside vm
 use lsblk to sanity check
 ```
