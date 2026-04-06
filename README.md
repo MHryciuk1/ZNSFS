@@ -25,6 +25,8 @@ qemu-system-x86_64 \
   -nographic \
   -serial mon:stdio
 ```
+
+
 # after initial setup use this to run qemu 
 ```
 qemu-system-x86_64 \
@@ -54,31 +56,12 @@ mkfs.f2fs -f -m -c /dev/vdb /dev/nvme0n1
 mount -t f2fs /dev/vdb /mnt/f2fs/
 ```
 # other
-for this type you need to extract kernel (not used right now)
+you may need to extract kernel
 ```
-mkdir -p iso-mount
-sudo mount -o loop "$ISO" iso-mount
-
-cp iso-mount/casper/vmlinuz "$KERNEL_PATH"
-cp iso-mount/casper/initrd "$INITRD_PATH"
-
-sudo umount iso-mount
-
-
-qemu-system-x86_64 \
-  -enable-kvm \
-  -cpu host \
-  -smp 4 \
-  -m 8G \
-  -kernel linux/arch/x86/boot/bzImage \
-  -append "root=/dev/vda console=ttyS0 rw loglevel=7" \
-  -drive file=vm.qcow2,if=virtio,format=qcow2 \
-  -device nvme,id=nvme0,serial=deadbeef \
-  -drive file=zns.img,if=none,id=zns0,format=raw \
-  -device nvme-ns,drive=zns0,bus=nvme0,nsid=1,\
-zoned=true,zoned.zone_size=64M,zoned.zone_capacity=64M \
-  -net user,hostfwd=tcp::2222-:22 \
-  -net nic \
-  -nographic
+mkdir -p /tmp/iso
+sudo mount -o loop ubuntu-24.04.4-live-server-amd64.iso /tmp/iso
+cp /tmp/iso/casper/vmlinuz /tmp/vmlinuz
+cp /tmp/iso/casper/initrd /tmp/initrd.img
+sudo umount /tmp/iso
 ```
 
