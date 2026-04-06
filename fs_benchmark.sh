@@ -1,6 +1,4 @@
 #!/bin/bash
-#
-#sudo ./zns_benchmark.sh
 
 set -euo pipefail
 
