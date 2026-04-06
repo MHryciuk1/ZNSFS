@@ -1,0 +1,320 @@
+#!/bin/bash
+#
+#sudo ./zns_benchmark.sh
+
+set -euo pipefail
+
+ZNS_DEV="${ZNS_DEV:-/dev/nvme0n1}"
+META_DEV="${META_DEV:-/dev/vdb}"
+OUTPUT="${OUTPUT:-zns_benchmark_results.csv}"
+
+ZONE_SIZE_MB=64
+TESTFILE_SIZE="1G"
+RUNTIME=30
+REPEATS=3
+
+BLOCK_SIZES=("4k" "16k" "64k" "128k")
+QUEUE_DEPTHS=("1" "4" "16" "32")
+FILESYSTEMS=("f2fs" "btrfs" "xfs" "zlfs")
+
+FIO_OUT="/tmp/fio_output.json"
+ZONE_SNAP_BEFORE="/tmp/zone_snap_before.txt"
+ZONE_SNAP_AFTER="/tmp/zone_snap_after.txt"
+
+log() { echo "[$(date +%H:%M:%S)] $*"; }
+
+require_cmds() {
+    local missing=()
+    for cmd in fio jq blkzone bc mount umount wipefs; do
+        command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
+    done
+    if [[ ${#missing[@]} -gt 0 ]]; then
+        echo "ERROR: Missing tools: ${missing[*]}"
+        echo "Install: sudo apt-get install -y fio jq util-linux bc"
+        exit 1
+    fi
+}
+
+check_root() {
+    if [[ "$(id -u)" -ne 0 ]]; then
+        echo "ERROR: run as root"
+        exit 1
+    fi
+}
+
+check_devices() {
+    [[ -b "$ZNS_DEV" ]] || { echo "ERROR: missing ZNS device $ZNS_DEV"; exit 1; }
+    [[ -b "$META_DEV" ]] || { echo "ERROR: missing metadata device $META_DEV"; exit 1; }
+}
+
+dev_base() {
+    basename "$1"
+}
+
+is_zoned_host_managed() {
+    [[ "$(cat /sys/block/$(dev_base "$1")/queue/zoned 2>/dev/null || echo none)" == "host-managed" ]]
+}
+
+is_non_zoned() {
+    [[ "$(cat /sys/block/$(dev_base "$1")/queue/zoned 2>/dev/null || echo none)" == "none" ]]
+}
+
+cleanup_mounts() {
+    umount /mnt/f2fs 2>/dev/null || true
+    umount /mnt/btrfs 2>/dev/null || true
+    umount /mnt/xfs 2>/dev/null || true
+    umount /mnt/zonefs 2>/dev/null || true
+}
+
+wipe_devices() {
+    wipefs -a "$META_DEV" >/dev/null 2>&1 || true
+
+    blkzone reset "$ZNS_DEV" >/dev/null 2>&1 || true
+    wipefs -a "$ZNS_DEV" >/dev/null 2>&1 || true
+}
+
+get_sectors_written() {
+    awk '{print $7}' "/sys/block/$(dev_base "$ZNS_DEV")/stat"
+}
+
+snapshot_zone_wptrs() {
+    blkzone report "$ZNS_DEV" 2>/dev/null \
+        | sed -n 's/.*wptr \(0x[0-9a-fA-F]*\).*/\1/p' \
+        | while read -r hex; do printf "%d\n" "$hex"; done > "$1"
+}
+
+count_zone_resets() {
+    paste "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER" 2>/dev/null \
+        | awk '$2 < $1 {r++} END {print r+0}'
+}
+
+parse_bw()         { jq '.jobs[0].read.bw + .jobs[0].write.bw' "$FIO_OUT"; }
+parse_iops()       { jq '.jobs[0].read.iops + .jobs[0].write.iops' "$FIO_OUT"; }
+parse_lat_mean()   { jq '.jobs[0].read.lat_ns.mean + .jobs[0].write.lat_ns.mean' "$FIO_OUT"; }
+parse_app_bytes_w(){ jq '.jobs[0].write.io_bytes' "$FIO_OUT"; }
+
+parse_clat_pct() {
+    local key
+    key=$(printf "%.6f" "$1")
+    jq "((.jobs[0].read.clat_ns.percentile  // {}) | .[\"$key\"] // 0) +
+        ((.jobs[0].write.clat_ns.percentile // {}) | .[\"$key\"] // 0)" "$FIO_OUT"
+}
+
+setup_f2fs() {
+    log "Formatting F2FS"
+    wipe_devices
+    mkdir -p /mnt/f2fs
+    mkfs.f2fs -f -m -c "$ZNS_DEV" "$META_DEV" >/dev/null
+    mount -t f2fs "$META_DEV" /mnt/f2fs
+}
+
+teardown_f2fs() {
+    rm -f /mnt/f2fs/testfile 2>/dev/null || true
+    umount /mnt/f2fs 2>/dev/null || true
+}
+
+setup_btrfs() {
+    log "Formatting Btrfs (zoned)"
+    wipe_devices
+    mkdir -p /mnt/btrfs
+    mkfs.btrfs -f --zoned "$ZNS_DEV" >/dev/null
+    mount -t btrfs "$ZNS_DEV" /mnt/btrfs
+}
+
+teardown_btrfs() {
+    rm -f /mnt/btrfs/testfile 2>/dev/null || true
+    umount /mnt/btrfs 2>/dev/null || true
+}
+
+setup_xfs() {
+    log "Formatting XFS (zoned)"
+    wipe_devices
+    mkdir -p /mnt/xfs
+
+    if ! command -v mkfs.xfs >/dev/null 2>&1; then
+        echo "SKIP: mkfs.xfs not installed"
+        return 1
+    fi
+
+    mkfs.xfs -f -r rtdev="$ZNS_DEV" "$META_DEV" >/dev/null
+    mount -t xfs -o rtdev="$ZNS_DEV" "$META_DEV" /mnt/xfs
+}
+
+teardown_xfs() {
+    rm -f /mnt/xfs/testfile 2>/dev/null || true
+    umount /mnt/xfs 2>/dev/null || true
+}
+
+setup_zlfs() {
+    log "Formatting z-lfs"
+    wipe_devices
+    mkdir -p /mnt/zlfs
+
+    #fill in mkfs and mount commands for z-lfs
+    # mkfs.zlfs -f "$ZNS_DEV" >/dev/null
+    # mount -t zlfs "$ZNS_DEV" /mnt/zlfs
+    echo "SKIP: z-lfs setup not implemented"
+    return 1
+}
+
+teardown_zlfs() {
+    umount /mnt/zlfs 2>/dev/null || true
+    # add teardown steps for z-lfs
+}
+
+populate_read_data() {
+    local fs=$1
+    local mount_dir=$2
+
+    log "Pre-filling data for $fs read benchmark"
+
+    rm -f "$mount_dir/testfile" 2>/dev/null || true
+    dd if=/dev/zero of="$mount_dir/testfile" bs=1M count=1024 oflag=direct status=none
+    sync
+}
+
+run_test() {
+    local fs=$1
+    local mount_dir=$2
+    local workload_name=$3
+    local rw=$4
+    local bs=$5
+    local qd=$6
+    local run=$7
+
+    printf "  [%-6s] %-10s bs=%-5s qd=%-3s run=%d\n" "$fs" "$workload_name" "$bs" "$qd" "$run"
+
+    local filename
+    local extra_args=()
+
+    filename="$mount_dir/testfile"
+    extra_args=(--size="$TESTFILE_SIZE" --time_based --runtime="$RUNTIME")
+    rm -f "$filename" 2>/dev/null || true
+
+    local sectors_before sectors_after
+    sectors_before=$(get_sectors_written)
+    snapshot_zone_wptrs "$ZONE_SNAP_BEFORE"
+
+    fio \
+        --name="$workload_name" \
+        --filename="$filename" \
+        --ioengine=libaio \
+        --direct=1 \
+        --rw="$rw" \
+        --bs="$bs" \
+        --iodepth="$qd" \
+        --numjobs=1 \
+        --group_reporting \
+        --output="$FIO_OUT" \
+        --output-format=json \
+        "${extra_args[@]}" >/dev/null 2>&1
+
+    sectors_after=$(get_sectors_written)
+    snapshot_zone_wptrs "$ZONE_SNAP_AFTER"
+
+    local BW IOPS LAT_MEAN LAT_P99 LAT_P999 LAT_P9999
+    BW=$(parse_bw)
+    IOPS=$(parse_iops)
+    LAT_MEAN=$(parse_lat_mean)
+    LAT_P99=$(parse_clat_pct 99)
+    LAT_P999=$(parse_clat_pct 99.9)
+    LAT_P9999=$(parse_clat_pct 99.99)
+
+    local WRITE_AMP="N/A"
+    local app_bytes
+    app_bytes=$(parse_app_bytes_w)
+    if [[ "$app_bytes" =~ ^[0-9]+$ ]] && (( app_bytes > 0 )); then
+        local dev_bytes=$(( (sectors_after - sectors_before) * 512 ))
+        WRITE_AMP=$(echo "scale=4; $dev_bytes / $app_bytes" | bc)
+    fi
+
+    local ZONE_RESETS
+    ZONE_RESETS=$(count_zone_resets)
+
+    echo "$fs,$workload_name,$bs,$qd,$run,$BW,$IOPS,$LAT_MEAN,$LAT_P99,$LAT_P999,$LAT_P9999,$WRITE_AMP,$ZONE_RESETS" >> "$OUTPUT"
+}
+
+run_fs_suite() {
+    local fs=$1
+    local mount_dir="/mnt/$fs"
+
+    echo "══════════════════════════════════════════════"
+    echo " Filesystem: $fs"
+    echo "══════════════════════════════════════════════"
+
+    if ! "setup_${fs}"; then
+        echo "SKIP: setup failed for $fs"
+        echo
+        return 0
+    fi
+
+    for WORKLOAD in "seq_write write" "seq_read read"; do
+        local NAME="${WORKLOAD%% *}"
+        local MODE="${WORKLOAD##* }"
+
+        echo
+        echo " Workload: $NAME"
+
+        [[ "$MODE" == "read" ]] && populate_read_data "$fs" "$mount_dir"
+
+        for BS in "${BLOCK_SIZES[@]}"; do
+            for QD in "${QUEUE_DEPTHS[@]}"; do
+                for (( RUN=1; RUN<=REPEATS; RUN++ )); do
+                    run_test "$fs" "$mount_dir" "$NAME" "$MODE" "$BS" "$QD" "$RUN"
+                done
+            done
+        done
+    done
+
+    "teardown_${fs}" || true
+    echo
+    echo " Done with $fs"
+    echo
+}
+
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 <filesystem>"
+    echo "  filesystem: f2fs | btrfs | xfs | zonefs"
+    exit 1
+fi
+
+FS_ARG="$1"
+
+if [[ ! " ${FILESYSTEMS[*]} " =~ " ${FS_ARG} " ]]; then
+    echo "ERROR: unknown filesystem '$FS_ARG'. Choose from: ${FILESYSTEMS[*]}"
+    exit 1
+fi
+
+check_root
+require_cmds
+check_devices
+
+if ! is_zoned_host_managed "$ZNS_DEV"; then
+    echo "ERROR: $ZNS_DEV is not detected as host-managed zoned"
+    cat "/sys/block/$(dev_base "$ZNS_DEV")/queue/zoned" 2>/dev/null || true
+    exit 1
+fi
+
+if ! is_non_zoned "$META_DEV"; then
+    echo "ERROR: $META_DEV is not a conventional non-zoned block device"
+    cat "/sys/block/$(dev_base "$META_DEV")/queue/zoned" 2>/dev/null || true
+    exit 1
+fi
+
+cleanup_mounts
+rm -f "$FIO_OUT" "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER"
+
+echo "filesystem,workload,block_size,queue_depth,run,bandwidth_KBps,iops,lat_mean_ns,lat_p99_ns,lat_p999_ns,lat_p9999_ns,write_amplification,zone_resets" > "$OUTPUT"
+
+echo "ZNS Benchmark Suite"
+echo "ZNS device : $ZNS_DEV"
+echo "META device: $META_DEV"
+echo "Output     : $OUTPUT"
+echo
+
+run_fs_suite "$FS_ARG"
+
+rm -f "$FIO_OUT" "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER"
+
+echo "Benchmark complete."
+echo "Results saved to: $OUTPUT"s
