@@ -23,7 +23,7 @@ log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 require_cmds() {
     local missing=()
-    for cmd in fio jq blkzone bc mount umount wipefs; do
+    for cmd in fio jq blkzone bc wipefs; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
     if [[ ${#missing[@]} -gt 0 ]]; then
@@ -57,12 +57,6 @@ is_non_zoned() {
     [[ "$(cat /sys/block/$(dev_base "$1")/queue/zoned 2>/dev/null || echo none)" == "none" ]]
 }
 
-cleanup_mounts() {
-    umount /mnt/f2fs 2>/dev/null || true
-    umount /mnt/btrfs 2>/dev/null || true
-    umount /mnt/xfs 2>/dev/null || true
-    umount /mnt/zonefs 2>/dev/null || true
-}
 
 wipe_devices() {
     wipefs -a "$META_DEV" >/dev/null 2>&1 || true
@@ -101,33 +95,28 @@ parse_clat_pct() {
 setup_f2fs() {
     log "Formatting F2FS"
     wipe_devices
-    mkdir -p /mnt/f2fs
     mkfs.f2fs -f -m -c "$ZNS_DEV" "$META_DEV" >/dev/null
-    mount -t f2fs "$META_DEV" /mnt/f2fs
 }
 
 teardown_f2fs() {
     rm -f /mnt/f2fs/testfile 2>/dev/null || true
-    umount /mnt/f2fs 2>/dev/null || true
 }
 
 setup_btrfs() {
-    log "Formatting Btrfs (zoned)"
+    log "Formatting Btrfs"
     wipe_devices
-    mkdir -p /mnt/btrfs
-    mkfs.btrfs -f --zoned "$ZNS_DEV" >/dev/null
+    sudo mkdir -p /mnt/btrfs
+    mkfs.btrfs -f "$ZNS_DEV" >/dev/null
     mount -t btrfs "$ZNS_DEV" /mnt/btrfs
 }
 
 teardown_btrfs() {
     rm -f /mnt/btrfs/testfile 2>/dev/null || true
-    umount /mnt/btrfs 2>/dev/null || true
 }
 
 setup_xfs() {
     log "Formatting XFS (zoned)"
     wipe_devices
-    mkdir -p /mnt/xfs
 
     if ! command -v mkfs.xfs >/dev/null 2>&1; then
         echo "SKIP: mkfs.xfs not installed"
@@ -135,29 +124,24 @@ setup_xfs() {
     fi
 
     mkfs.xfs -f -r rtdev="$ZNS_DEV" "$META_DEV" >/dev/null
-    mount -t xfs -o rtdev="$ZNS_DEV" "$META_DEV" /mnt/xfs
 }
 
 teardown_xfs() {
     rm -f /mnt/xfs/testfile 2>/dev/null || true
-    umount /mnt/xfs 2>/dev/null || true
 }
 
 setup_zlfs() {
     log "Formatting z-lfs"
     wipe_devices
-    mkdir -p /mnt/zlfs
-
-    #fill in mkfs and mount commands for z-lfs
+    # TODO: fill in mkfs command for z-lfs
     # mkfs.zlfs -f "$ZNS_DEV" >/dev/null
-    # mount -t zlfs "$ZNS_DEV" /mnt/zlfs
     echo "SKIP: z-lfs setup not implemented"
     return 1
 }
 
 teardown_zlfs() {
-    umount /mnt/zlfs 2>/dev/null || true
-    # add teardown steps for z-lfs
+    rm -f /mnt/zlfs/testfile 2>/dev/null || true
+    # TODO: any teardown steps for z-lfs
 }
 
 populate_read_data() {
@@ -299,7 +283,6 @@ if ! is_non_zoned "$META_DEV"; then
     exit 1
 fi
 
-cleanup_mounts
 rm -f "$FIO_OUT" "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER"
 
 echo "filesystem,workload,block_size,queue_depth,run,bandwidth_KBps,iops,lat_mean_ns,lat_p99_ns,lat_p999_ns,lat_p9999_ns,write_amplification,zone_resets" > "$OUTPUT"
