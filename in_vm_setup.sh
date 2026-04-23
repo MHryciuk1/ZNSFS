@@ -1,8 +1,14 @@
 sudo apt update && sudo apt install -y \
 build-essential \
-clang llvm lld \
-gcc g++ make \
-bc bison flex \
+clang \
+llvm \
+lld \
+gcc \
+g++ \
+make \
+bc \
+bison \
+flex \
 libssl-dev \
 libelf-dev \
 libncurses-dev \
@@ -27,12 +33,7 @@ curl \
 vim \
 nano \
 autoconf \
-automake \ 
-libtool \ 
-uuid-dev \
-libblkid-dev \
-libselinux1-dev \
-make
+automake 
 git clone https://github.com/Z-LFS/Z-LFS.git
 cd Z-LFS/linux-5.17.4
 
