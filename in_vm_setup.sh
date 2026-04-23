@@ -31,7 +31,8 @@ automake \
 libtool \ 
 uuid-dev \
 libblkid-dev \
-libselinux1-dev
+libselinux1-dev \
+make
 git clone https://github.com/Z-LFS/Z-LFS.git
 cd Z-LFS/linux-5.17.4
 
