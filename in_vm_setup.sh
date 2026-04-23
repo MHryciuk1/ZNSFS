@@ -34,6 +34,9 @@ vim \
 nano \
 autoconf \
 automake 
+sudo apt install -y autoconf automake libtool pkg-config
+sudo apt install -y uuid-dev libblkid-dev libselinux1-dev
+
 git clone https://github.com/Z-LFS/Z-LFS.git
 cd Z-LFS/linux-5.17.4
 
