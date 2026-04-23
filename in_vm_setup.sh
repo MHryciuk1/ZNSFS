@@ -33,7 +33,8 @@ curl \
 vim \
 nano \
 autoconf \
-automake 
+automake \
+nvme-cli
 sudo apt install -y autoconf automake libtool pkg-config
 sudo apt install -y uuid-dev libblkid-dev libselinux1-dev
 
