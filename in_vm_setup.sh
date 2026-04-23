@@ -58,6 +58,7 @@ make defconfig
 ./scripts/config --enable CONFIG_NVME_CORE
 ./scripts/config --enable CONFIG_BLK_DEV_NVME
 
+./scripts/config --set-str LOCALVERSION "-zlfs"
 ./scripts/config --module CONFIG_F2FS_FS
 
 make olddefconfig
