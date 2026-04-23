@@ -55,6 +55,25 @@ use lsblk to sanity check
 mkfs.f2fs -f -m -c /dev/vdb /dev/nvme0n1
 mount -t f2fs /dev/vdb /mnt/f2fs/
 ```
+# z-lfs
+```
+qemu-system-x86_64 \
+  -enable-kvm \
+  -m 8G \
+  -smp 4 \
+  -cpu host \
+  -kernel vmlinuz-5.17.4 \
+  -initrd initrd.img-5.17.4 \
+  -append "root=/dev/mapper/ubuntu--vg-ubuntu--lv console=ttyS0 loglevel=7" \
+  -drive file=vm.qcow2,if=virtio,format=qcow2 \
+  -device nvme,id=nvme0,serial=deadbeef \
+  -drive file=zns.img,if=none,id=zns0,format=raw \
+  -device nvme-ns,drive=zns0,bus=nvme0,nsid=1,zoned=true,zoned.zone_size=64M,zoned.zone_capacity=64M \
+  -drive file=meta.img,if=virtio,format=raw \
+  -net user,hostfwd=tcp::2222-:22 \
+  -net nic \
+  -nographic
+```
 # other
 you may need to extract kernel
 ```
