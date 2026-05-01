@@ -7,9 +7,9 @@ ZNS_DEV="${ZNS_DEV:-/dev/nvme0n1}"
 META_DEV="${META_DEV:-/dev/vdb}"
 OUTPUT="${OUTPUT:-zns_benchmark_results.csv}"
 
-TESTFILE_SIZE="${TESTFILE_SIZE:-1G}"
+TESTFILE_SIZE="${TESTFILE_SIZE:-256M}"
 RUNTIME="${RUNTIME:-30}"
-REPEATS="${REPEATS:-3}"
+REPEATS="${REPEATS:-1}"
 
 # Edit these for shorter/longer sweeps
 BLOCK_SIZES=("4k" "16k" "64k" "128k")
@@ -209,12 +209,25 @@ teardown_zlfs() {
 populate_read_data() {
     local fs=$1
     local mount_dir=$2
+    local filename="$mount_dir/testfile"
 
     log "Pre-filling data for $fs read benchmark"
-
-    rm -f "$mount_dir/testfile" 2>/dev/null || true
-    dd if=/dev/zero of="$mount_dir/testfile" bs=1M count=1024 oflag=direct status=none
+    rm -f "$filename" 2>/dev/null || true
     sync
+     fio \
+	--name=prefill \
+	 --filename="$filename" \
+	 --ioengine=libaio \
+         --direct=1 \
+	 --rw=write \
+         --bs=128k \
+         --iodepth=1 \
+         --size="$TESTFILE_SIZE" \
+	 --numjobs=1 \
+	 --group_reporting \
+	 --output=/tmp/fio_prefill.json \
+	 --output-format=json
+         sync
 }
 
 run_test() {
@@ -316,7 +329,7 @@ run_fs_suite() {
         fi
     fi
 
-    for WORKLOAD in "seq_write write" "seq_read read"; do
+    for WORKLOAD in "seq_write write"  "seq_read read"; do
         local NAME="${WORKLOAD%% *}"
         local MODE="${WORKLOAD##* }"
 
