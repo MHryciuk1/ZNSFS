@@ -2,15 +2,18 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 # Load CSV
-df = pd.read_csv("benchmark_results.csv")
+df = pd.read_csv("data/zlfs_results_aggregated.csv")
 
 # Convert block size strings (e.g., "4k") into numbers
+
+
 def convert_bs(bs):
     if "k" in bs:
-        return int(bs.replace("k","")) * 1024
+        return int(bs.replace("k", "")) * 1024
     if "M" in bs:
-        return int(bs.replace("M","")) * 1024 * 1024
+        return int(bs.replace("M", "")) * 1024 * 1024
     return int(bs)
+
 
 df["block_size_bytes"] = df["block_size"].apply(convert_bs)
 

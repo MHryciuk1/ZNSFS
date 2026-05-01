@@ -9,7 +9,7 @@ OUTPUT="${OUTPUT:-zns_benchmark_results.csv}"
 
 TESTFILE_SIZE="${TESTFILE_SIZE:-256M}"
 RUNTIME="${RUNTIME:-30}"
-REPEATS="${REPEATS:-1}"
+REPEATS="${REPEATS:-3}"
 
 # Edit these for shorter/longer sweeps
 BLOCK_SIZES=("4k" "16k" "64k" "128k")
@@ -157,7 +157,7 @@ setup_btrfs() {
 
     wipe_devices
 
-    mkfs.btrfs -f "$ZNS_DEV" >/dev/null
+   mkfs.btrfs -f "$ZNS_DEV" >/dev/null
     mount -t btrfs "$ZNS_DEV" "$mount_dir"
 }
 

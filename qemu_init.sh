@@ -1,6 +1,6 @@
 rm -rf zns.img meta.img vm.qcow2
 qemu-img create -f qcow2 vm.qcow2 40G
-truncate -s 16G zns.img
+truncate -s 64G zns.img
 truncate -s 512M meta.img
 rm -rf tmp
 mkdir -p tmp/iso
