@@ -19,6 +19,10 @@ FIO_OUT="/tmp/fio_output.json"
 ZONE_SNAP_BEFORE="/tmp/zone_snap_before.txt"
 ZONE_SNAP_AFTER="/tmp/zone_snap_after.txt"
 
+SKIP_SETUP=0
+SKIP_TEARDOWN=0
+MOUNT_DIR_OVERRIDE=""
+
 log() { echo "[$(date +%H:%M:%S)] $*"; }
 
 require_cmds() {
@@ -171,8 +175,9 @@ run_test() {
 
     filename="$mount_dir/testfile"
     extra_args=(--size="$TESTFILE_SIZE" --time_based --runtime="$RUNTIME")
-    rm -f "$filename" 2>/dev/null || true
-
+    if [[ "$rw" == "write" ]]; then
+    	rm -f "$filename" 2>/dev/null || true
+    fi
     local sectors_before sectors_after
     sectors_before=$(get_sectors_written)
     snapshot_zone_wptrs "$ZONE_SNAP_BEFORE"
@@ -220,14 +225,35 @@ run_fs_suite() {
     local fs=$1
     local mount_dir="/mnt/$fs"
 
+    if [[ -n "$MOUNT_DIR_OVERRIDE" ]]; then
+        mount_dir="$MOUNT_DIR_OVERRIDE"
+    fi
+
     echo "══════════════════════════════════════════════"
     echo " Filesystem: $fs"
+    echo " Mount dir : $mount_dir"
     echo "══════════════════════════════════════════════"
 
-    if ! "setup_${fs}"; then
-        echo "SKIP: setup failed for $fs"
-        echo
-        return 0
+    if [[ "$SKIP_SETUP" -eq 0 ]]; then
+        if ! "setup_${fs}"; then
+            echo "SKIP: setup failed for $fs"
+            echo
+            return 0
+        fi
+    else
+        log "Skipping setup for $fs"
+
+        if [[ ! -d "$mount_dir" ]]; then
+            echo "ERROR: mount directory does not exist: $mount_dir"
+            exit 1
+        fi
+
+        if ! mountpoint -q "$mount_dir"; then
+            echo "ERROR: $mount_dir is not a mount point"
+            echo "Mount Z-LFS first, for example:"
+            echo "  sudo mount -t f2fs /dev/ZNS $mount_dir"
+            exit 1
+        fi
     fi
 
     for WORKLOAD in "seq_write write" "seq_read read"; do
@@ -248,20 +274,67 @@ run_fs_suite() {
         done
     done
 
-    "teardown_${fs}" || true
+    if [[ "$SKIP_TEARDOWN" -eq 0 ]]; then
+        "teardown_${fs}" || true
+    else
+        log "Skipping teardown for $fs"
+    fi
+
     echo
     echo " Done with $fs"
     echo
 }
 
+usage() {
+    echo "Usage: $0 <filesystem> [options]"
+    echo "  filesystem: f2fs | btrfs | xfs | zlfs"
+    echo
+    echo "Options:"
+    echo "  --skip-setup       Do not format or mount the filesystem"
+    echo "  --skip-teardown    Do not delete testfile or unmount after tests"
+    echo "  --mount-dir DIR    Use DIR as the mounted filesystem path"
+    echo
+    echo "Example:"
+    echo "  sudo $0 zlfs --skip-setup --skip-teardown --mount-dir /mnt/ZNS"
+}
+
 if [[ $# -lt 1 ]]; then
-    echo "Usage: $0 <filesystem>"
-    echo "  filesystem: f2fs | btrfs | xfs | zonefs"
+    usage
     exit 1
 fi
 
 FS_ARG="$1"
+shift
 
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --skip-setup)
+            SKIP_SETUP=1
+            shift
+            ;;
+        --skip-teardown)
+            SKIP_TEARDOWN=1
+            shift
+            ;;
+        --mount-dir)
+            MOUNT_DIR_OVERRIDE="${2:-}"
+            if [[ -z "$MOUNT_DIR_OVERRIDE" ]]; then
+                echo "ERROR: --mount-dir requires a directory"
+                exit 1
+            fi
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "ERROR: unknown option '$1'"
+            usage
+            exit 1
+            ;;
+    esac
+done
 if [[ ! " ${FILESYSTEMS[*]} " =~ " ${FS_ARG} " ]]; then
     echo "ERROR: unknown filesystem '$FS_ARG'. Choose from: ${FILESYSTEMS[*]}"
     exit 1
