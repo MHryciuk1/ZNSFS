@@ -1,16 +1,17 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 set -euo pipefail
 
+# ---------------- CONFIG ----------------
 ZNS_DEV="${ZNS_DEV:-/dev/nvme0n1}"
 META_DEV="${META_DEV:-/dev/vdb}"
 OUTPUT="${OUTPUT:-zns_benchmark_results.csv}"
 
-ZONE_SIZE_MB=64
-TESTFILE_SIZE="1G"
-RUNTIME=30
-REPEATS=3
+TESTFILE_SIZE="${TESTFILE_SIZE:-1G}"
+RUNTIME="${RUNTIME:-30}"
+REPEATS="${REPEATS:-3}"
 
+# Edit these for shorter/longer sweeps
 BLOCK_SIZES=("4k" "16k" "64k" "128k")
 QUEUE_DEPTHS=("1" "4" "16" "32")
 FILESYSTEMS=("f2fs" "btrfs" "xfs" "zlfs")
@@ -23,13 +24,29 @@ SKIP_SETUP=0
 SKIP_TEARDOWN=0
 MOUNT_DIR_OVERRIDE=""
 
-log() { echo "[$(date +%H:%M:%S)] $*"; }
+log() {
+    echo "[$(date +%H:%M:%S)] $*"
+}
+
+usage() {
+    echo "Usage: $0 <filesystem> [options]"
+    echo "  filesystem: f2fs | btrfs | xfs | zlfs"
+    echo
+    echo "Options:"
+    echo "  --skip-setup       Do not format or mount the filesystem"
+    echo "  --skip-teardown    Do not delete testfile or unmount after tests"
+    echo "  --mount-dir DIR    Use DIR as the mounted filesystem path"
+    echo
+    echo "Example:"
+    echo "  sudo ZNS_DEV=/dev/nvme0n1 META_DEV=/dev/vdb OUTPUT=zlfs_results.csv $0 zlfs --skip-setup --skip-teardown --mount-dir /mnt/ZNS"
+}
 
 require_cmds() {
     local missing=()
-    for cmd in fio jq blkzone bc wipefs; do
+    for cmd in fio jq blkzone bc wipefs mountpoint awk paste sed; do
         command -v "$cmd" >/dev/null 2>&1 || missing+=("$cmd")
     done
+
     if [[ ${#missing[@]} -gt 0 ]]; then
         echo "ERROR: Missing tools: ${missing[*]}"
         echo "Install: sudo apt-get install -y fio jq util-linux bc"
@@ -46,7 +63,12 @@ check_root() {
 
 check_devices() {
     [[ -b "$ZNS_DEV" ]] || { echo "ERROR: missing ZNS device $ZNS_DEV"; exit 1; }
-    [[ -b "$META_DEV" ]] || { echo "ERROR: missing metadata device $META_DEV"; exit 1; }
+
+    # META_DEV is only required for filesystems that use it during setup.
+    # If --skip-setup is used, do not force META_DEV to exist.
+    if [[ "$SKIP_SETUP" -eq 0 ]]; then
+        [[ -b "$META_DEV" ]] || { echo "ERROR: missing metadata device $META_DEV"; exit 1; }
+    fi
 }
 
 dev_base() {
@@ -54,17 +76,15 @@ dev_base() {
 }
 
 is_zoned_host_managed() {
-    [[ "$(cat /sys/block/$(dev_base "$1")/queue/zoned 2>/dev/null || echo none)" == "host-managed" ]]
+    [[ "$(cat /sys/block/"$(dev_base "$1")"/queue/zoned 2>/dev/null || echo none)" == "host-managed" ]]
 }
 
 is_non_zoned() {
-    [[ "$(cat /sys/block/$(dev_base "$1")/queue/zoned 2>/dev/null || echo none)" == "none" ]]
+    [[ "$(cat /sys/block/"$(dev_base "$1")"/queue/zoned 2>/dev/null || echo none)" == "none" ]]
 }
-
 
 wipe_devices() {
     wipefs -a "$META_DEV" >/dev/null 2>&1 || true
-
     blkzone reset "$ZNS_DEV" >/dev/null 2>&1 || true
     wipefs -a "$ZNS_DEV" >/dev/null 2>&1 || true
 }
@@ -84,42 +104,75 @@ count_zone_resets() {
         | awk '$2 < $1 {r++} END {print r+0}'
 }
 
-parse_bw()         { jq '.jobs[0].read.bw + .jobs[0].write.bw' "$FIO_OUT"; }
-parse_iops()       { jq '.jobs[0].read.iops + .jobs[0].write.iops' "$FIO_OUT"; }
-parse_lat_mean()   { jq '.jobs[0].read.lat_ns.mean + .jobs[0].write.lat_ns.mean' "$FIO_OUT"; }
-parse_app_bytes_w(){ jq '.jobs[0].write.io_bytes' "$FIO_OUT"; }
+parse_bw() {
+    jq '.jobs[0].read.bw + .jobs[0].write.bw' "$FIO_OUT"
+}
+
+parse_iops() {
+    jq '.jobs[0].read.iops + .jobs[0].write.iops' "$FIO_OUT"
+}
+
+parse_lat_mean() {
+    jq '.jobs[0].read.lat_ns.mean + .jobs[0].write.lat_ns.mean' "$FIO_OUT"
+}
+
+parse_app_bytes_w() {
+    jq '.jobs[0].write.io_bytes' "$FIO_OUT"
+}
 
 parse_clat_pct() {
     local key
     key=$(printf "%.6f" "$1")
+
     jq "((.jobs[0].read.clat_ns.percentile  // {}) | .[\"$key\"] // 0) +
         ((.jobs[0].write.clat_ns.percentile // {}) | .[\"$key\"] // 0)" "$FIO_OUT"
 }
 
 setup_f2fs() {
     log "Formatting F2FS"
+    local mount_dir="/mnt/f2fs"
+
+    mkdir -p "$mount_dir"
+    umount "$mount_dir" 2>/dev/null || true
+
     wipe_devices
+
+    # This is the conventional F2FS-on-ZNS command, not Z-LFS.
     mkfs.f2fs -f -m -c "$ZNS_DEV" "$META_DEV" >/dev/null
+
+    mount -t f2fs "$META_DEV" "$mount_dir"
 }
 
 teardown_f2fs() {
     rm -f /mnt/f2fs/testfile 2>/dev/null || true
+    umount /mnt/f2fs 2>/dev/null || true
 }
 
 setup_btrfs() {
     log "Formatting Btrfs"
+    local mount_dir="/mnt/btrfs"
+
+    mkdir -p "$mount_dir"
+    umount "$mount_dir" 2>/dev/null || true
+
     wipe_devices
-    sudo mkdir -p /mnt/btrfs
+
     mkfs.btrfs -f "$ZNS_DEV" >/dev/null
-    mount -t btrfs "$ZNS_DEV" /mnt/btrfs
+    mount -t btrfs "$ZNS_DEV" "$mount_dir"
 }
 
 teardown_btrfs() {
     rm -f /mnt/btrfs/testfile 2>/dev/null || true
+    umount /mnt/btrfs 2>/dev/null || true
 }
 
 setup_xfs() {
-    log "Formatting XFS (zoned)"
+    log "Formatting XFS"
+    local mount_dir="/mnt/xfs"
+
+    mkdir -p "$mount_dir"
+    umount "$mount_dir" 2>/dev/null || true
+
     wipe_devices
 
     if ! command -v mkfs.xfs >/dev/null 2>&1; then
@@ -128,24 +181,29 @@ setup_xfs() {
     fi
 
     mkfs.xfs -f -r rtdev="$ZNS_DEV" "$META_DEV" >/dev/null
+    mount -t xfs "$META_DEV" "$mount_dir"
 }
 
 teardown_xfs() {
     rm -f /mnt/xfs/testfile 2>/dev/null || true
+    umount /mnt/xfs 2>/dev/null || true
 }
 
 setup_zlfs() {
-    log "Formatting z-lfs"
-    wipe_devices
-    # TODO: fill in mkfs command for z-lfs
-    # mkfs.zlfs -f "$ZNS_DEV" >/dev/null
-    echo "SKIP: z-lfs setup not implemented"
+    log "Z-LFS setup not implemented in this script."
+    log "Use --skip-setup when Z-LFS is already formatted and mounted."
     return 1
 }
 
 teardown_zlfs() {
-    rm -f /mnt/zlfs/testfile 2>/dev/null || true
-    # TODO: any teardown steps for z-lfs
+    local mount_dir="/mnt/zlfs"
+    if [[ -n "$MOUNT_DIR_OVERRIDE" ]]; then
+        mount_dir="$MOUNT_DIR_OVERRIDE"
+    fi
+
+    sync
+    rm -f "$mount_dir/testfile" 2>/dev/null || true
+    umount "$mount_dir" 2>/dev/null || true
 }
 
 populate_read_data() {
@@ -170,14 +228,14 @@ run_test() {
 
     printf "  [%-6s] %-10s bs=%-5s qd=%-3s run=%d\n" "$fs" "$workload_name" "$bs" "$qd" "$run"
 
-    local filename
-    local extra_args=()
+    local filename="$mount_dir/testfile"
+    local extra_args=(--size="$TESTFILE_SIZE" --time_based --runtime="$RUNTIME")
 
-    filename="$mount_dir/testfile"
-    extra_args=(--size="$TESTFILE_SIZE" --time_based --runtime="$RUNTIME")
+    # Do not delete the file for read tests; populate_read_data creates it.
     if [[ "$rw" == "write" ]]; then
-    	rm -f "$filename" 2>/dev/null || true
+        rm -f "$filename" 2>/dev/null || true
     fi
+
     local sectors_before sectors_after
     sectors_before=$(get_sectors_written)
     snapshot_zone_wptrs "$ZONE_SNAP_BEFORE"
@@ -210,6 +268,7 @@ run_test() {
     local WRITE_AMP="N/A"
     local app_bytes
     app_bytes=$(parse_app_bytes_w)
+
     if [[ "$app_bytes" =~ ^[0-9]+$ ]] && (( app_bytes > 0 )); then
         local dev_bytes=$(( (sectors_after - sectors_before) * 512 ))
         WRITE_AMP=$(echo "scale=4; $dev_bytes / $app_bytes" | bc)
@@ -250,7 +309,8 @@ run_fs_suite() {
 
         if ! mountpoint -q "$mount_dir"; then
             echo "ERROR: $mount_dir is not a mount point"
-            echo "Mount Z-LFS first, for example:"
+            echo "Mount it first, for example:"
+            echo "  sudo mkdir -p $mount_dir"
             echo "  sudo mount -t f2fs /dev/ZNS $mount_dir"
             exit 1
         fi
@@ -263,7 +323,9 @@ run_fs_suite() {
         echo
         echo " Workload: $NAME"
 
-        [[ "$MODE" == "read" ]] && populate_read_data "$fs" "$mount_dir"
+        if [[ "$MODE" == "read" ]]; then
+            populate_read_data "$fs" "$mount_dir"
+        fi
 
         for BS in "${BLOCK_SIZES[@]}"; do
             for QD in "${QUEUE_DEPTHS[@]}"; do
@@ -285,18 +347,7 @@ run_fs_suite() {
     echo
 }
 
-usage() {
-    echo "Usage: $0 <filesystem> [options]"
-    echo "  filesystem: f2fs | btrfs | xfs | zlfs"
-    echo
-    echo "Options:"
-    echo "  --skip-setup       Do not format or mount the filesystem"
-    echo "  --skip-teardown    Do not delete testfile or unmount after tests"
-    echo "  --mount-dir DIR    Use DIR as the mounted filesystem path"
-    echo
-    echo "Example:"
-    echo "  sudo $0 zlfs --skip-setup --skip-teardown --mount-dir /mnt/ZNS"
-}
+# ---------------- ARG PARSING ----------------
 
 if [[ $# -lt 1 ]]; then
     usage
@@ -335,6 +386,7 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
 if [[ ! " ${FILESYSTEMS[*]} " =~ " ${FS_ARG} " ]]; then
     echo "ERROR: unknown filesystem '$FS_ARG'. Choose from: ${FILESYSTEMS[*]}"
     exit 1
@@ -350,10 +402,12 @@ if ! is_zoned_host_managed "$ZNS_DEV"; then
     exit 1
 fi
 
-if ! is_non_zoned "$META_DEV"; then
-    echo "ERROR: $META_DEV is not a conventional non-zoned block device"
-    cat "/sys/block/$(dev_base "$META_DEV")/queue/zoned" 2>/dev/null || true
-    exit 1
+if [[ "$SKIP_SETUP" -eq 0 ]]; then
+    if ! is_non_zoned "$META_DEV"; then
+        echo "ERROR: $META_DEV is not a conventional non-zoned block device"
+        cat "/sys/block/$(dev_base "$META_DEV")/queue/zoned" 2>/dev/null || true
+        exit 1
+    fi
 fi
 
 rm -f "$FIO_OUT" "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER"
@@ -364,6 +418,9 @@ echo "ZNS Benchmark Suite"
 echo "ZNS device : $ZNS_DEV"
 echo "META device: $META_DEV"
 echo "Output     : $OUTPUT"
+echo "Runtime    : $RUNTIME"
+echo "Size       : $TESTFILE_SIZE"
+echo "Repeats    : $REPEATS"
 echo
 
 run_fs_suite "$FS_ARG"
@@ -371,4 +428,4 @@ run_fs_suite "$FS_ARG"
 rm -f "$FIO_OUT" "$ZONE_SNAP_BEFORE" "$ZONE_SNAP_AFTER"
 
 echo "Benchmark complete."
-echo "Results saved to: $OUTPUT"s
+echo "Results saved to: $OUTPUT"
