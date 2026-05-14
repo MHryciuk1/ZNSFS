@@ -1,0 +1,14 @@
+# QEMU / VM disk images
+*.qcow2
+*.img
+
+# Ubuntu installer ISOs
+*.iso
+*.iso.*
+
+# Specific local VM artifacts
+vm.qcow2
+zns.img
+meta.img
+ubuntu-24.04.4-live-server-amd64.iso
+ubuntu-24.04.4-live-server-amd64.iso.1
